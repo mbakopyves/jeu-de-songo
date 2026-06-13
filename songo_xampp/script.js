@@ -44,7 +44,7 @@ const SOWING_LOOPS = {
     // Joueur 2 (Nord) : nord 7→1 puis sud 1→7
     2: [
         ...[6, 5, 4, 3, 2, 1, 0].map(i => ({ side: 'nord', index: i })),
-        ...[6, 5, 4, 3, 2, 1, 0].map(i => ({ side: 'sud', index: i })),
+        ...[0, 1, 2, 3, 4, 5, 6].map(i => ({ side: 'sud', index: i })),
     ],
     // Joueur 1 (Sud) : sud 1→7 puis nord 1→7
     1: [

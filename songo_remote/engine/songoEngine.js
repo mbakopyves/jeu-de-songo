@@ -13,7 +13,7 @@ const MIN_BOARD_SEEDS = 10;
 const SOWING_LOOPS = {
     2: [
         ...[6, 5, 4, 3, 2, 1, 0].map((i) => ({ side: 'nord', index: i })),
-        ...[6, 5, 4, 3, 2, 1, 0].map((i) => ({ side: 'sud', index: i })),
+        ...[0, 1, 2, 3, 4, 5, 6].map((i) => ({ side: 'sud', index: i })),
     ],
     1: [
         ...[6, 5, 4, 3, 2, 1, 0].map((i) => ({ side: 'sud', index: i })),
