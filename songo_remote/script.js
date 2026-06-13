@@ -21,9 +21,9 @@ const MAX_HISTORY_ENTRIES = 20;
 const REFUSAL_DISPLAY_MS = 10000;
 const SESSION_STORAGE_KEY = 'songo-remote-session';
 const POLL_INTERVAL_MS = 2000;
-const ANIM_STEP_MS_MIN = 70;
-const ANIM_STEP_MS_MAX = 160;
-const ANIM_TOTAL_MAX_MS = 3500;
+const ANIM_STEP_MS_MIN = 200;   // Ralenti (était 70)
+const ANIM_STEP_MS_MAX = 400;   // Ralenti (était 160)
+const ANIM_TOTAL_MAX_MS = 8000; // Ralenti (était 3500)
 
 /** État du plateau reçu du serveur */
 let state = null;
@@ -37,6 +37,8 @@ let playerSlot = null;
 let remoteLegalMoves = [];
 /** Timer de synchronisation (sans WebSocket) */
 let pollTimer = null;
+/** Évite les clics multiples pendant l'attente serveur */
+let clickInFlight = false;
 /** Dernier coup déjà animé (évite de rejouer au polling) */
 let lastAnimatedMoveId = 0;
 /** true pendant l'animation de distribution */
@@ -221,26 +223,54 @@ function renderBoardFromSnapshot(snapshot) {
             seedsEl.className = 'seeds';
             pit.appendChild(seedsEl);
         }
-        renderSeedsInContainer(seedsEl, count);
 
-        let countEl = pit.querySelector('.pit__count');
-        if (count > 12) {
-            if (!countEl) {
-                countEl = document.createElement('span');
-                countEl.className = 'pit__count';
-                pit.appendChild(countEl);
+        // Optimisation : ne redessiner que si le nombre de graines a changé
+        if (seedsEl.getAttribute('data-count') !== count.toString()) {
+            seedsEl.setAttribute('data-count', count);
+            renderSeedsInContainer(seedsEl, count);
+
+            let countEl = pit.querySelector('.pit__count');
+            if (count > 12) {
+                if (!countEl) {
+                    countEl = document.createElement('span');
+                    countEl.className = 'pit__count';
+                    pit.appendChild(countEl);
+                }
+                countEl.textContent = count;
+            } else if (countEl) {
+                countEl.remove();
             }
-            countEl.textContent = count;
-        } else if (countEl) {
-            countEl.remove();
         }
     });
 
     if (snapshot.scores) {
         document.querySelectorAll('.score-value').forEach((el) => {
             const p = parseInt(el.dataset.player, 10);
-            el.textContent = snapshot.scores[p - 1];
+            if (el.textContent !== snapshot.scores[p - 1].toString()) {
+                el.textContent = snapshot.scores[p - 1];
+            }
         });
+    }
+}
+
+/** Son de déplacement des graines prechargé */
+const sowSound = new Audio('audio/clicDeplacement.wav');
+sowSound.preload = 'auto';
+
+let lastSowSoundTime = 0;
+function playSowSound() {
+    if (!sowSound) return;
+    const now = Date.now();
+    // Anti-rebond : évite les doubles clics accidentels en < 50ms
+    if (now - lastSowSoundTime < 50) return;
+    lastSowSoundTime = now;
+
+    try {
+        const sound = sowSound.cloneNode(true);
+        sound.volume = 0.6;
+        sound.play().catch(() => {});
+    } catch (e) {
+        /* ignore */
     }
 }
 
@@ -284,6 +314,7 @@ async function animateMove(lastMove, boardBefore) {
 
         anim[step.side][step.index]++;
         renderBoardFromSnapshot(anim);
+        playSowSound();
 
         if (i === lastMove.sowSteps.length - 1 && targetPit) {
             targetPit.classList.add('pit--last-sown');
@@ -314,13 +345,27 @@ async function animateMove(lastMove, boardBefore) {
 }
 
 async function processServerResponse(data, boardBefore) {
-    const moveBefore = data.lastMove?.boardBefore || boardBefore;
+    if (!data.lastMove) {
+        applyServerGame(data);
+        renderGame();
+        return;
+    }
+
+    const isNewMove = data.lastMove.id !== lastAnimatedMoveId;
+    if (!isNewMove) {
+        applyServerGame(data);
+        renderGame();
+        return;
+    }
+
+    // Nouveau coup détecté : on marque immédiatement l'ID pour bloquer les appels concurrents
+    lastAnimatedMoveId = data.lastMove.id;
+
+    const moveBefore = data.lastMove.boardBefore || boardBefore;
     const shouldAnimate = Boolean(
-        data.lastMove
-        && data.lastMove.id !== lastAnimatedMoveId
-        && moveBefore
-        && data.lastMove.sowSteps
-        && data.lastMove.sowSteps.length > 0
+        moveBefore &&
+        data.lastMove.sowSteps &&
+        data.lastMove.sowSteps.length > 0
     );
 
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -329,7 +374,6 @@ async function processServerResponse(data, boardBefore) {
         isAnimating = true;
         try {
             await animateMove(data.lastMove, moveBefore);
-            lastAnimatedMoveId = data.lastMove.id;
         } finally {
             isAnimating = false;
         }
@@ -339,9 +383,6 @@ async function processServerResponse(data, boardBefore) {
             statusEl.textContent =
                 `Joueur ${data.lastMove.player} — case ${data.lastMove.caseNumber} (${data.lastMove.seedsPicked} graines)`;
         }
-        lastAnimatedMoveId = data.lastMove.id;
-    } else if (data.lastMove && data.lastMove.id !== lastAnimatedMoveId) {
-        lastAnimatedMoveId = data.lastMove.id;
     }
 
     applyServerGame(data);
@@ -545,17 +586,20 @@ function createPitElement(player, index, side) {
     pit.setAttribute('aria-label', `Case ${caseNumber(side, index)}, joueur ${player}`);
 
     pit.addEventListener('click', async () => {
-        if (!state || state.gameOver || isAnimating) return;
+        if (!state || state.gameOver || isAnimating || clickInFlight) return;
 
         if (player !== playerSlot) {
             showMoveRefusal('Vous ne pouvez jouer que sur votre propre camp.');
             return;
         }
 
+        clickInFlight = true;
         try {
             await playMoveRemote(index);
         } catch (err) {
             showMoveRefusal(err.message);
+        } finally {
+            clickInFlight = false;
         }
     });
 
@@ -601,19 +645,24 @@ function renderGame() {
             seedsEl.className = 'seeds';
             pit.appendChild(seedsEl);
         }
-        renderSeedsInContainer(seedsEl, count);
 
-        // Compteur si trop de graines à afficher
-        let countEl = pit.querySelector('.pit__count');
-        if (count > 12) {
-            if (!countEl) {
-                countEl = document.createElement('span');
-                countEl.className = 'pit__count';
-                pit.appendChild(countEl);
+        // Optimisation : éviter le rendu inutile si le nombre n'a pas changé
+        if (seedsEl.getAttribute('data-count') !== count.toString()) {
+            seedsEl.setAttribute('data-count', count);
+            renderSeedsInContainer(seedsEl, count);
+
+            // Compteur si trop de graines à afficher
+            let countEl = pit.querySelector('.pit__count');
+            if (count > 12) {
+                if (!countEl) {
+                    countEl = document.createElement('span');
+                    countEl.className = 'pit__count';
+                    pit.appendChild(countEl);
+                }
+                countEl.textContent = count;
+            } else if (countEl) {
+                countEl.remove();
             }
-            countEl.textContent = count;
-        } else if (countEl) {
-            countEl.remove();
         }
     });
 
