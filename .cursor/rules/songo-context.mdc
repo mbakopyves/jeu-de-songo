@@ -1,0 +1,132 @@
+---
+description: Contexte projet Songo — règles du jeu, consignes prof, structure des fichiers
+alwaysApply: true
+---
+
+# Projet Songo (TP scolaire)
+
+Jeu de semailles africain (communauté Ekang : Ewondo, Bulu, etc.). Référence officielle des règles : https://www.clubawale.com/post/comment-jouer-le-songo
+
+## Consignes du professeur
+
+- **Version 1 (ce dépôt)** : les deux joueurs sur le **même site** — HTML, CSS, JavaScript.
+- **Version 2** (à faire séparément) : autre version (réseau / multi-sites).
+- **Rapport obligatoire** (hors code) : fonctionnement du jeu, principe, algorithme, organisation du code.
+
+## Structure des fichiers (strict)
+
+| Fichier | Rôle |
+|---------|------|
+| `index.html` | Interface utilisateur **uniquement** (un seul fichier HTML) |
+| `css/style.css` | Tous les styles |
+| `script.js` | Toute la logique JavaScript |
+
+Ne pas disperser l'interface dans d'autres fichiers HTML. Ne pas mettre de CSS/JS inline sauf nécessité technique documentée.
+
+## Qualité du code
+
+- Code **commenté** (logique métier, algorithmes, règles spéciales).
+- Code **bien structuré** : séparation claire UI / état du jeu / règles / rendu.
+- Nommage explicite en français ou anglais, mais cohérent dans tout le projet.
+
+## Plateau et notation
+
+```
+NORD  | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+SUD   | 7 | 6 | 5 | 4 | 3 | 2 | 1 |
+```
+
+- 2 joueurs, 2 territoires (NORD / SUD).
+- 7 cases par camp, **5 graines par case** au départ (70 graines total).
+- Tours alternés ; le premier joueur est libre (tirage au sort côté UI).
+
+## Mécanique de distribution
+
+1. Ramasser toutes les graines d'une case de **son** territoire.
+2. Les déposer une à une, **sans sauter de case**, de la droite vers la gauche dans son camp, puis de la gauche vers la droite dans le camp adverse (boucle).
+3. Si la case choisie contient **plus de 13 graines** : faire un tour complet **sans** remplir la case source, puis continuer la distribution **uniquement** dans le camp adverse (depuis la gauche) jusqu'à épuisement.
+
+## Récoltes (prises)
+
+- Prises **uniquement** dans le territoire adverse, **sauf la case n°1** (la plus à gauche vue par le joueur).
+- Prise si la dernière graine tombe dans une case adverse contenant **1 à 3 graines** avant la pose → on récolte **2 à 4 graines** (dernière incluse).
+- **Prise à la chaîne** : récolter aussi les cases précédentes adjacentes du camp adverse qui contiennent 2 à 4 graines.
+- **Cas spécial case 1** : si la distribution s'y termine après au moins 1 tour complet (14, 21, 28… graines distribuées), on ne récolte qu'**1 graine**.
+- Pas de prise 2/3/4 dans la case 1 si la distribution s'y termine, sauf si elle fait partie d'une prise à la chaîne.
+
+## Solidarité
+
+1. Si toutes les cases adverses sont vides → jouer un coup distribuant **au moins 7 graines** chez l'adversaire.
+2. Sinon → jouer le coup qui lui transmet le **maximum** de graines possible.
+3. Si aucun coup n'atteint le camp adverse → **fin de partie** ; graines restantes au propriétaire du camp.
+
+## Interdits
+
+1. **Case 7** : interdit de semer 1 ou 2 graines chez l'adversaire. Si contraint (solidarité), ces graines reviennent à l'adversaire.
+2. Interdit de **vider complètement** le camp adverse ; si un tel coup est joué, **aucune prise** n'est effectuée.
+
+## Fin de partie
+
+La partie s'arrête quand :
+- la solidarité est impossible ;
+- il reste **moins de 10 graines** sur le tablier (graines d'un camp → propriétaire) ;
+- un joueur atteint **≥ 40 graines**.
+
+**Vainqueur** : ≥ 40 graines sur 70. Sinon **match nul**.
+
+## Règles du jeu — source unique
+
+Toutes les règles métier doivent suivre **strictement** l'article :
+https://www.clubawale.com/post/comment-jouer-le-songo
+Ne pas inventer de variantes. En cas de doute, se référer au lien.
+
+## Design UI (référence visuelle)
+
+Inspiré des captures de l'app mobile Awalé/Songo (style tribal, skeuomorphique).
+Références visuelles locales : dossier `assets/` (captures Play Store).
+
+### Ambiance générale
+
+- Fond **parchemin** beige avec motifs tribaux discrets (spirales, géométrie).
+- Palette : bruns bois, beige/ocré, vert sauge pour les graines, texte noir patiné.
+- Style **matériel** : bois, graines en relief, boutons en lambeaux de parchemin.
+
+### Plateau
+
+- Planche en **bois foncé** (texture grain), deux demi-planches reliées par **charnières** au centre.
+- **2 rangées × 7 cases** circulaires (Songo, pas Awalé à 6 cases).
+- Cases en creux (`box-shadow: inset`) avec graines empilées naturellement.
+- Graines : petites billes vert olive, légèrement irrégulières, ombre portée.
+
+### Typographie
+
+- Police décorative type « tribal / estampé » (ex. Google Fonts : `MedievalSharp`, `Pirata One`, ou similaire).
+- Texte en majuscules, noir, effet légèrement usé.
+
+### Écrans et composants
+
+**Écran d'accueil** (inspiré capture menu Awalé) :
+- Titre **SONGO** centré en haut.
+- Boutons parchemin : **JOUER**, **RÈGLES** (lien vers article Club Awalé), optionnel **NOUVELLE PARTIE**.
+- Icônes discrètes (son, aide) si souhaité.
+
+**Écran de partie** (inspiré captures en jeu) :
+- Haut gauche : boutons **ABANDON** et **REPRISE** (style parchemin déchiré).
+- Au-dessus du plateau : score Joueur 2 (graines capturées) + label **JOUEUR 2** (ou **NORD**).
+- Plateau central 7×2.
+- Sous le plateau : score Joueur 1 + label **JOUEUR 1** (ou **SUD**).
+- Indication du tour actif : surbrillance de la rangée jouable + curseur main optionnel.
+- Message central pour fin de partie / solidarité / coups forcés.
+
+### Adaptations pour la version locale 2 joueurs
+
+- Remplacer **ORDINATEUR** par **JOUEUR 2** (rangée du haut).
+- **JOUEUR 1** joue la rangée du bas (comme dans l'app de référence).
+- Pas de « NIVEAU FACILE » ni « CAPTURE MAX 5 » (spécifique à l'IA).
+- Les deux joueurs alternent sur le même écran ; seules les cases du joueur actif sont cliquables.
+
+### Contraintes techniques design
+
+- Tout le HTML structurel dans `index.html`, styles dans `css/style.css`.
+- Préférer CSS (dégradés, ombres, textures CSS ou images libres) plutôt que copier les assets propriétaires de l'app.
+- Responsive : le plateau reste lisible sur desktop ; mobile en paysage de préférence.

@@ -108,8 +108,7 @@
         <!-- Barre inférieure : actions -->
         <footer class="menu-footer">
             <button type="button" class="parchment-btn" id="btn-scores">SCORES</button>
-            <button type="button" class="parchment-btn" id="btn-join">REJOINDRE</button>
-            <button type="button" class="parchment-btn parchment-btn--primary" id="btn-play">CRÉER</button>
+            <button type="button" class="parchment-btn parchment-btn--primary" id="btn-play">JOUER</button>
             <button type="button" class="parchment-btn icon-only" id="btn-about" title="À propos">↩</button>
         </footer>
     </section>
@@ -135,9 +134,6 @@
                 <span class="player-label">JOUEUR 2</span>
             </div>
         </div>
-
-        <!-- Code de partie / attente adversaire -->
-        <p class="game-lobby-status" id="game-lobby-status" hidden></p>
 
         <!-- Message de statut (tour, solidarité, fin…) -->
         <p class="game-status" id="game-status" role="status">Tour de Joueur 1</p>
@@ -187,23 +183,6 @@
                 </a>
             </p>
             <button type="button" class="parchment-btn" id="btn-close-about">FERMER</button>
-        </div>
-    </dialog>
-
-    <dialog id="join-modal" class="rules-modal">
-        <div class="rules-modal__content parchment-panel">
-            <h2>Rejoindre une partie</h2>
-            <p>Entrez le code affiché par le joueur qui a créé la partie.</p>
-            <form id="join-form" class="join-form">
-                <label class="join-form__label" for="join-code-input">Code de partie</label>
-                <input type="text" id="join-code-input" class="join-form__input"
-                       maxlength="12" autocomplete="off" autocapitalize="characters"
-                       placeholder="Ex. ABC123" required>
-                <div class="scores-modal__actions">
-                    <button type="button" class="parchment-btn" id="btn-cancel-join">ANNULER</button>
-                    <button type="submit" class="parchment-btn parchment-btn--primary">REJOINDRE</button>
-                </div>
-            </form>
         </div>
     </dialog>
 

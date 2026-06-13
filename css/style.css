@@ -46,7 +46,7 @@ html, body {
         radial-gradient(ellipse at 80% 70%, rgba(160, 82, 45, 0.10) 0%, transparent 45%),
         repeating-linear-gradient(
             0deg,
-            transparent,
+            transparent,    
             transparent 3px,
             rgba(139, 90, 43, 0.04) 3px,
             rgba(139, 90, 43, 0.04) 4px
@@ -659,7 +659,7 @@ html, body {
     animation: pickPulse 0.6s ease;
 }
 
-/* Animation remote — distribution des graines */
+/* Animation — distribution des graines */
 .board--interactive .pit--picked {
     animation: pickPulse 0.8s ease infinite;
     outline: 3px solid rgba(255, 180, 50, 0.9);
@@ -681,35 +681,6 @@ html, body {
 
 .board--interactive .pit--harvested {
     animation: harvestFlash 0.55s ease;
-}
-
-.join-form {
-    display: flex;
-    flex-direction: column;
-    gap: 0.75rem;
-    margin-top: 0.5rem;
-}
-
-.join-form__label {
-    font-size: 0.95rem;
-}
-
-.join-form__input {
-    width: 100%;
-    padding: 0.6rem 0.75rem;
-    font-family: inherit;
-    font-size: 1.1rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    border: 2px solid #8b6914;
-    border-radius: 6px;
-    background: var(--parchment-light);
-    color: var(--ink);
-}
-
-.join-form__input:focus {
-    outline: 2px solid rgba(255, 180, 50, 0.8);
-    outline-offset: 2px;
 }
 
 @keyframes pickPulse {
@@ -815,20 +786,6 @@ html, body {
 .player-label {
     font-size: clamp(0.75rem, 2vw, 1rem);
     letter-spacing: 0.12em;
-}
-
-.game-lobby-status {
-    position: relative;
-    z-index: 6;
-    font-size: clamp(0.8rem, 2.2vw, 1rem);
-    letter-spacing: 0.05em;
-    text-align: center;
-    padding: 0.45rem 1rem;
-    margin-bottom: 0.25rem;
-    background: rgba(107, 58, 31, 0.12);
-    border: 1px dashed rgba(107, 58, 31, 0.45);
-    border-radius: 6px;
-    max-width: 92%;
 }
 
 .game-status {

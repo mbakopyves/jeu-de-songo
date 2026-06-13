@@ -1,414 +1,482 @@
 /**
  * ============================================================
- *  SONGO REMOTE — Client (HTML + CSS + JavaScript + AJAX)
- *  Communication serveur via XMLHttpRequest (sans rechargement de page).
- *  La logique métier du jeu est sur le serveur Node.js (engine/).
+ *  SONGO — Jeu de semailles (version locale 2 joueurs)
  *  Règles : https://www.clubawale.com/post/comment-jouer-le-songo
  * ============================================================
+ *
+ *  Organisation du code :
+ *  1. Constantes & état du jeu
+ *  2. Moteur de règles (distribution, récoltes, solidarité)
+ *  3. Rendu visuel (plateau, graines)
+ *  4. Navigation entre écrans
+ *  5. Initialisation
  */
 
 'use strict';
 
 /* ============================================================
-   1. CONSTANTES & ÉTAT CLIENT
+   1. CONSTANTES & ÉTAT
    ============================================================ */
 
 const CASES = 7;
 const INITIAL_SEEDS = 5;
 const WIN_SCORE = 40;
+const MIN_BOARD_SEEDS = 10; // fin si moins de 10 graines sur le tablier
 const STATS_STORAGE_KEY = 'songo-match-stats';
 const MAX_HISTORY_ENTRIES = 20;
 const REFUSAL_DISPLAY_MS = 10000;
-const SESSION_STORAGE_KEY = 'songo-remote-session';
-const POLL_INTERVAL_MS = 2000;
 const ANIM_STEP_MS_MIN = 70;
 const ANIM_STEP_MS_MAX = 160;
 const ANIM_TOTAL_MAX_MS = 3500;
 
-/** État du plateau reçu du serveur */
+/** @type {{ nord: number[], sud: number[], scores: [number, number], currentPlayer: 1|2, gameOver: boolean, message: string }} */
 let state = null;
-/** Identifiant de la partie en ligne */
-let gameId = null;
-/** Jeton secret du joueur connecté */
-let playerToken = null;
-/** 1 = Sud (bas), 2 = Nord (haut) */
-let playerSlot = null;
-/** Cases jouables renvoyées par le serveur */
-let remoteLegalMoves = [];
-/** Timer de synchronisation (sans WebSocket) */
-let pollTimer = null;
-/** Dernier coup déjà animé (évite de rejouer au polling) */
-let lastAnimatedMoveId = 0;
-/** true pendant l'animation de distribution */
+/** true pendant l'animation de distribution des graines */
 let isAnimating = false;
-/** évite les requêtes de synchronisation concurrentes */
-let syncInFlight = false;
+
+/** Séquence de semis pour chaque joueur (boucle de 14 cases) */
+const SOWING_LOOPS = {
+    // Joueur 2 (Nord) : nord 7→1 puis sud 1→7
+    2: [
+        ...[6, 5, 4, 3, 2, 1, 0].map(i => ({ side: 'nord', index: i })),
+        ...[6, 5, 4, 3, 2, 1, 0].map(i => ({ side: 'sud', index: i })),
+    ],
+    // Joueur 1 (Sud) : sud 1→7 puis nord 1→7
+    1: [
+        ...[6, 5, 4, 3, 2, 1, 0].map(i => ({ side: 'sud', index: i })),
+        ...[0, 1, 2, 3, 4, 5, 6].map(i => ({ side: 'nord', index: i })),
+    ],
+};
 
 /* ============================================================
-   2. AJAX — communication asynchrone avec le serveur
+   2. MOTEUR DE RÈGLES
    ============================================================ */
 
+/** Crée l'état initial d'une partie */
+function createInitialState() {
+    return {
+        nord: Array(CASES).fill(INITIAL_SEEDS),
+        sud: Array(CASES).fill(INITIAL_SEEDS),
+        scores: [0, 0],       // [joueur1, joueur2]
+        currentPlayer: 1,
+        gameOver: false,
+        statsRecorded: false,
+        endChoiceMade: false,
+        message: 'Tour de Joueur 1',
+    };
+}
+
+/** Retourne le camp d'un joueur */
 function playerSide(player) {
     return player === 2 ? 'nord' : 'sud';
 }
 
+/** Camp adverse */
 function opponentSide(player) {
     return player === 2 ? 'sud' : 'nord';
 }
 
+/** Numéro de case (1-7) depuis l'index interne */
 function caseNumber(side, index) {
     return side === 'nord' ? index + 1 : CASES - index;
 }
 
+/** Index de la case n°1 du camp adverse (interdite pour prise simple) */
+function opponentCase1Index(player) {
+    return player === 2 ? 6 : 0; // sud case 1 = index 6, nord case 1 = index 0
+}
+
+/** Index de la case n°7 du joueur (règle d'interdit) */
+function playerCase7Index(player) {
+    return player === 2 ? 6 : 0;
+}
+
+/** Total de graines sur le tablier */
+function boardTotal() {
+    return state.nord.reduce((a, b) => a + b, 0) + state.sud.reduce((a, b) => a + b, 0);
+}
+
+/** Graines dans le camp adverse */
 function opponentSeeds(player) {
-    if (!state) return 0;
     const side = opponentSide(player);
     return state[side].reduce((a, b) => a + b, 0);
 }
 
-/**
- * Requête AJAX (XMLHttpRequest) vers l'API REST.
- * Échange JSON avec le serveur sans recharger la page.
- *
- * @param {string} method  GET | POST | DELETE
- * @param {string} path    ex. /api/games/ABC123/moves
- * @param {object} [body]  corps JSON pour POST
- * @returns {Promise<object>}
- */
-function ajaxRequest(method, path, body) {
-    return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open(method, path, true);
-        xhr.setRequestHeader('Content-Type', 'application/json');
-        if (playerToken) {
-            xhr.setRequestHeader('X-Player-Token', playerToken);
+/** Simule la distribution et retourne le résultat sans modifier l'état */
+function simulateMove(player, pickIndex) {
+    const side = playerSide(player);
+    const seeds = state[side][pickIndex];
+    if (seeds === 0) return null;
+
+    const board = {
+        nord: [...state.nord],
+        sud: [...state.sud],
+    };
+    board[side][pickIndex] = 0;
+
+    const loop = SOWING_LOOPS[player];
+    let loopStart = loop.findIndex(c => c.side === side && c.index === pickIndex);
+    let pos = (loopStart + 1) % loop.length;
+    let remaining = seeds;
+    let lastCell = null;
+    let distributed = 0;
+    const skipSourceOnLap = seeds > 13;
+    let completedLaps = 0;
+    let seedsAtStart = seeds;
+    const sowSteps = [];
+
+    while (remaining > 0) {
+        const cell = loop[pos];
+
+        // Règle >13 : après un tour complet, ne semer que chez l'adversaire
+        if (seedsAtStart > 13 && completedLaps >= 1 && cell.side === side) {
+            pos = (pos + 1) % loop.length;
+            if (pos === (loopStart + 1) % loop.length) completedLaps++;
+            continue;
         }
 
-        xhr.onload = function onAjaxLoad() {
-            let data = {};
-            try {
-                data = xhr.responseText ? JSON.parse(xhr.responseText) : {};
-            } catch {
-                data = {};
+        // Règle >13 : ne pas remplir la case source pendant le 1er tour
+        if (skipSourceOnLap && completedLaps === 0 && cell.side === side && cell.index === pickIndex) {
+            pos = (pos + 1) % loop.length;
+            if (pos === (loopStart + 1) % loop.length) completedLaps++;
+            continue;
+        }
+
+        board[cell.side][cell.index]++;
+        sowSteps.push({ side: cell.side, index: cell.index });
+        remaining--;
+        distributed++;
+        lastCell = { ...cell, count: board[cell.side][cell.index] };
+        pos = (pos + 1) % loop.length;
+        if (pos === (loopStart + 1) % loop.length) completedLaps++;
+    }
+
+    return { board, lastCell, distributed, pickIndex, pickSide: side, seedsPicked: seeds, sowSteps };
+}
+
+/** Calcule les graines récoltées après une distribution */
+function calculateHarvest(player, simResult) {
+    const oppSide = opponentSide(player);
+    const { board, lastCell, distributed, seedsPicked } = simResult;
+
+    if (!lastCell || lastCell.side !== oppSide) {
+        return { harvested: 0, board, harvestedPits: [] };
+    }
+
+    const case1Idx = opponentCase1Index(player);
+    let harvested = 0;
+    const harvestedPits = [];
+    const resultBoard = { nord: [...board.nord], sud: [...board.sud] };
+
+    // Interdit : vider complètement le camp adverse → aucune prise
+    if (resultBoard[oppSide].every(v => v === 0)) {
+        return { harvested: 0, board: resultBoard, harvestedPits: [] };
+    }
+
+    const lastIdx = lastCell.index;
+    const countAfter = lastCell.count;
+
+    // Cas spécial : terminer en case 1 après tour(s) complet(s)
+    const fullLaps = Math.floor(distributed / 14);
+    if (lastIdx === case1Idx && fullLaps >= 1 && distributed >= 14) {
+        if (countAfter >= 1) {
+            harvested = 1;
+            harvestedPits.push({ side: oppSide, index: lastIdx, count: 1 });
+            resultBoard[oppSide][lastIdx] -= 1;
+        }
+        return { harvested, board: resultBoard, harvestedPits };
+    }
+
+    // Pas de prise 2-3-4 en case 1 si distribution s'y termine (hors chaîne)
+    if (lastIdx === case1Idx) return { harvested: 0, board: resultBoard, harvestedPits: [] };
+
+    // Prise standard : dernière case avec 2-4 graines (avant = 1-3)
+    if (countAfter >= 2 && countAfter <= 4) {
+        harvested += countAfter;
+        harvestedPits.push({ side: oppSide, index: lastIdx, count: countAfter });
+        resultBoard[oppSide][lastIdx] = 0;
+
+        // Prise à la chaîne : cases précédentes vers la case n°1 adverse
+        const chainStep = player === 2 ? 1 : -1;
+        let chainIdx = lastIdx + chainStep;
+        while (chainIdx >= 0 && chainIdx < CASES) {
+            const c = resultBoard[oppSide][chainIdx];
+            if (c >= 2 && c <= 4) {
+                harvested += c;
+                harvestedPits.push({ side: oppSide, index: chainIdx, count: c });
+                resultBoard[oppSide][chainIdx] = 0;
+                chainIdx += chainStep;
+            } else break;
+        }
+    }
+
+    return { harvested, board: resultBoard, harvestedPits };
+}
+
+/**
+ * Interdit case 7 : semer 1 ou 2 graines chez l'adversaire
+ * en jouant depuis sa case n°7 (peu importe le nombre ramassé).
+ */
+function violatesCase7Rule(player, simResult) {
+    if (simResult.pickIndex !== playerCase7Index(player)) return false;
+    const sown = seedsSownToOpponent(player, simResult);
+    return sown > 0 && sown <= 2;
+}
+
+/**
+ * Si contraint par la solidarité, les 1-2 graines semées chez l'adversaire
+ * depuis la case 7 reviennent à l'adversaire (score), pas sur le tablier.
+ */
+function applyCase7SolidarityReturn(player, simResult) {
+    if (!violatesCase7Rule(player, simResult)) return;
+
+    const oppSide = opponentSide(player);
+    const oppPlayer = player === 1 ? 2 : 1;
+    const sown = seedsSownToOpponent(player, simResult);
+
+    state.scores[oppPlayer - 1] += sown;
+
+    let remaining = sown;
+    for (let i = 0; i < CASES && remaining > 0; i++) {
+        const gained = simResult.board[oppSide][i] - state[oppSide][i];
+        if (gained <= 0) continue;
+        const remove = Math.min(gained, remaining);
+        simResult.board[oppSide][i] -= remove;
+        remaining -= remove;
+    }
+}
+
+/** Compte les graines semées chez l'adversaire */
+function seedsSownToOpponent(player, simResult) {
+    const oppSide = opponentSide(player);
+    const before = state[oppSide].reduce((a, b) => a + b, 0);
+    const after = simResult.board[oppSide].reduce((a, b) => a + b, 0);
+    return after - before;
+}
+
+/** Coups légaux pour le joueur actuel */
+function getLegalMoves() {
+    if (state.gameOver) return [];
+
+    const player = state.currentPlayer;
+    const side = playerSide(player);
+    const moves = [];
+
+    for (let i = 0; i < CASES; i++) {
+        if (state[side][i] === 0) continue;
+
+        const sim = simulateMove(player, i);
+        if (!sim) continue;
+
+        moves.push({
+            index: i,
+            sim,
+            case7Violation: violatesCase7Rule(player, sim),
+        });
+    }
+
+    // Hors solidarité : interdit case 7 (1-2 graines chez l'adversaire)
+    const pool = opponentSeeds(player) === 0
+        ? moves
+        : moves.filter(m => !m.case7Violation);
+
+    // Règle de solidarité (adversaire sans aucune graine sur son camp)
+    if (opponentSeeds(player) === 0) {
+        if (pool.length === 0) return [];
+
+        // Coups qui atteignent réellement le camp adverse
+        const reachingOpponent = pool.filter(
+            m => seedsSownToOpponent(player, m.sim) > 0
+        );
+
+        // Règle 3 : aucun coup n'atteint le camp adverse → fin de partie
+        if (reachingOpponent.length === 0) return [];
+
+        // Règle 1 : priorité aux coups distribuant au moins 7 graines chez l'adversaire
+        const solidarityMoves = reachingOpponent.filter(
+            m => seedsSownToOpponent(player, m.sim) >= 7
+        );
+        if (solidarityMoves.length > 0) return solidarityMoves;
+
+        // Règle 2 : sinon, maximum de graines transmises à l'adversaire
+        const maxSown = Math.max(
+            ...reachingOpponent.map(m => seedsSownToOpponent(player, m.sim))
+        );
+        return reachingOpponent.filter(
+            m => seedsSownToOpponent(player, m.sim) === maxSown
+        );
+    }
+
+    return pool;
+}
+
+/**
+ * Explique pourquoi un clic sur une case est refusé.
+ * Retourne null si le coup est autorisé.
+ */
+function explainRefusedMove(clickPlayer, pickIndex) {
+    if (!state || state.gameOver) return null;
+
+    if (clickPlayer !== state.currentPlayer) {
+        return `Ce n'est pas votre tour — c'est au tour du Joueur ${state.currentPlayer}.`;
+    }
+
+    const player = state.currentPlayer;
+    const side = playerSide(player);
+
+    if (state[side][pickIndex] === 0) {
+        return 'Cette case est vide : choisissez une case contenant des graines.';
+    }
+
+    const legal = getLegalMoves();
+    if (legal.some((m) => m.index === pickIndex)) return null;
+
+    const sim = simulateMove(player, pickIndex);
+    if (!sim) return 'Ce coup n\'est pas autorisé.';
+
+    const sown = seedsSownToOpponent(player, sim);
+    const oppEmpty = opponentSeeds(player) === 0;
+
+    if (!oppEmpty && violatesCase7Rule(player, sim)) {
+        return 'Interdit depuis la case 7 : vous ne pouvez semer que 3 graines ou plus chez l\'adversaire (1 ou 2 graines interdites).';
+    }
+
+    if (oppEmpty) {
+        if (sown === 0) {
+            return 'Solidarité : ce coup n\'atteint pas le camp adverse. Distribuez des graines chez l\'adversaire.';
+        }
+
+        const sideMoves = [];
+        for (let i = 0; i < CASES; i++) {
+            if (state[side][i] === 0) continue;
+            const moveSim = simulateMove(player, i);
+            if (!moveSim) continue;
+            sideMoves.push({ index: i, sim: moveSim });
+        }
+
+        const reaching = sideMoves.filter((m) => seedsSownToOpponent(player, m.sim) > 0);
+        const solidarityMoves = reaching.filter((m) => seedsSownToOpponent(player, m.sim) >= 7);
+
+        if (solidarityMoves.length > 0 && sown < 7) {
+            return 'Solidarité : vous devez distribuer au moins 7 graines à l\'adversaire.';
+        }
+
+        if (reaching.length > 0) {
+            const maxSown = Math.max(...reaching.map((m) => seedsSownToOpponent(player, m.sim)));
+            if (sown < maxSown) {
+                return `Solidarité : choisissez le coup qui transmet le plus de graines à l'adversaire (${maxSown} graines).`;
             }
-
-            if (xhr.status >= 200 && xhr.status < 300) {
-                resolve(data);
-                return;
-            }
-            const err = new Error(data.error || 'Erreur de communication avec le serveur.');
-            err.status = xhr.status;
-            reject(err);
-        };
-
-        xhr.onerror = function onAjaxError() {
-            reject(new Error('Erreur réseau — impossible de joindre le serveur.'));
-        };
-
-        xhr.send(body !== undefined ? JSON.stringify(body) : null);
-    });
-}
-
-function applyServerGame(data) {
-    if (data.state) {
-        state = {
-            ...data.state,
-            statsRecorded: state?.statsRecorded || false,
-            endChoiceMade: state?.endChoiceMade || false,
-        };
-    }
-    if (data.id) gameId = data.id;
-    if (data.token) playerToken = data.token;
-    if (data.playerSlot) playerSlot = data.playerSlot;
-    remoteLegalMoves = data.legalMoves || [];
-
-    if (state?.gameOver && !state.statsRecorded) {
-        recordMatchResult();
+        }
     }
 
-    saveSession();
-    updateLobbyStatus(data.status);
+    return 'Ce coup n\'est pas autorisé selon les règles du Songo.';
 }
 
-function saveSession() {
-    if (!gameId || !playerToken) return;
-    try {
-        sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
-            gameId,
-            playerToken,
-            playerSlot,
-        }));
-    } catch {
-        /* mode privé */
-    }
+/** Solidarité impossible : adversaire vide, on a des graines, mais aucun coup ne l'atteint */
+function isSolidarityImpossible(player) {
+    if (opponentSeeds(player) !== 0) return false;
+    const side = playerSide(player);
+    if (state[side].every(v => v === 0)) return false;
+    return getLegalMoves().length === 0;
 }
 
-function clearSession() {
-    gameId = null;
-    playerToken = null;
-    playerSlot = null;
-    remoteLegalMoves = [];
-    try {
-        sessionStorage.removeItem(SESSION_STORAGE_KEY);
-    } catch {
-        /* ignore */
-    }
-}
+/** Applique un coup (avec animation de distribution) */
+async function playMove(pickIndex) {
+    const player = state.currentPlayer;
+    const legal = getLegalMoves();
+    const move = legal.find(m => m.index === pickIndex);
+    if (!move) return false;
 
-function updateLobbyStatus(status) {
-    const lobby = document.getElementById('game-lobby-status');
-    if (!lobby) return;
-
-    if (status === 'waiting' && gameId) {
-        lobby.hidden = false;
-        lobby.textContent = `Code partie : ${gameId} — en attente du Joueur 2…`;
-        return;
-    }
-
-    lobby.hidden = true;
-    lobby.textContent = '';
-}
-
-function startPolling() {
-    stopPolling();
-    pollTimer = window.setInterval(syncFromServer, POLL_INTERVAL_MS);
-}
-
-function stopPolling() {
-    if (pollTimer !== null) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-    }
-}
-
-function snapshotBoard() {
-    if (!state) return null;
-    return {
+    const sim = move.sim;
+    const boardBefore = {
         nord: [...state.nord],
         sud: [...state.sud],
         scores: [...state.scores],
     };
-}
 
-function delay(ms) {
-    return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
-function findPit(side, index) {
-    return document.querySelector(
-        `#game-board .pit[data-side="${side}"][data-index="${index}"]`
-    );
-}
-
-function clearPitHighlights() {
-    document.querySelectorAll('#game-board .pit').forEach((pit) => {
-        pit.classList.remove('pit--picked', 'pit--sowing', 'pit--harvested', 'pit--last-sown');
-    });
-}
-
-/** Affiche le plateau à partir d'un instantané (pendant l'animation) */
-function renderBoardFromSnapshot(snapshot) {
-    if (!snapshot) return;
-
-    document.querySelectorAll('#game-board .pit').forEach((pit) => {
-        const side = pit.dataset.side;
-        const index = parseInt(pit.dataset.index, 10);
-        const count = snapshot[side][index];
-
-        let seedsEl = pit.querySelector('.seeds');
-        if (!seedsEl) {
-            seedsEl = document.createElement('div');
-            seedsEl.className = 'seeds';
-            pit.appendChild(seedsEl);
-        }
-        renderSeedsInContainer(seedsEl, count);
-
-        let countEl = pit.querySelector('.pit__count');
-        if (count > 12) {
-            if (!countEl) {
-                countEl = document.createElement('span');
-                countEl.className = 'pit__count';
-                pit.appendChild(countEl);
-            }
-            countEl.textContent = count;
-        } else if (countEl) {
-            countEl.remove();
-        }
-    });
-
-    if (snapshot.scores) {
-        document.querySelectorAll('.score-value').forEach((el) => {
-            const p = parseInt(el.dataset.player, 10);
-            el.textContent = snapshot.scores[p - 1];
-        });
+    // Solidarité forcée + case 7 : graines rendues à l'adversaire avant récolte
+    if (move.case7Violation) {
+        applyCase7SolidarityReturn(player, sim);
     }
-}
 
-/**
- * Anime la distribution des graines pour que les 2 joueurs voient le coup.
- */
-async function animateMove(lastMove, boardBefore) {
-    const statusEl = document.getElementById('game-status');
-    const anim = {
-        nord: [...boardBefore.nord],
-        sud: [...boardBefore.sud],
-        scores: [...boardBefore.scores],
+    const { harvested, board, harvestedPits } = calculateHarvest(player, sim);
+    const pickSide = playerSide(player);
+    const lastMove = {
+        player,
+        pickIndex,
+        pickSide,
+        caseNumber: caseNumber(pickSide, pickIndex),
+        seedsPicked: sim.seedsPicked,
+        sowSteps: sim.sowSteps || [],
+        harvested,
+        harvestedPits: harvestedPits || [],
     };
 
-    const stepCount = lastMove.sowSteps.length;
-    const stepMs = Math.max(
-        ANIM_STEP_MS_MIN,
-        Math.min(ANIM_STEP_MS_MAX, Math.floor(ANIM_TOTAL_MAX_MS / Math.max(stepCount, 1)))
-    );
-
-    if (statusEl) {
-        statusEl.textContent =
-            `Joueur ${lastMove.player} joue la case ${lastMove.caseNumber} (${lastMove.seedsPicked} graines)`;
-    }
-
-    clearPitHighlights();
-    const sourcePit = findPit(lastMove.pickSide, lastMove.pickIndex);
-    if (sourcePit) sourcePit.classList.add('pit--picked');
-
-    anim[lastMove.pickSide][lastMove.pickIndex] = 0;
-    renderBoardFromSnapshot(anim);
-    await delay(400);
-
-    for (let i = 0; i < lastMove.sowSteps.length; i++) {
-        const step = lastMove.sowSteps[i];
-        clearPitHighlights();
-        if (sourcePit) sourcePit.classList.add('pit--picked');
-
-        const targetPit = findPit(step.side, step.index);
-        if (targetPit) targetPit.classList.add('pit--sowing');
-
-        anim[step.side][step.index]++;
-        renderBoardFromSnapshot(anim);
-
-        if (i === lastMove.sowSteps.length - 1 && targetPit) {
-            targetPit.classList.add('pit--last-sown');
-        }
-
-        await delay(stepMs);
-    }
-
-    if (lastMove.harvested > 0) {
-        clearPitHighlights();
-        for (const h of lastMove.harvestedPits) {
-            const pit = findPit(h.side, h.index);
-            if (pit) pit.classList.add('pit--harvested');
-            anim[h.side][h.index] -= h.count;
-            if (anim[h.side][h.index] < 0) anim[h.side][h.index] = 0;
-        }
-        anim.scores[lastMove.player - 1] += lastMove.harvested;
-        renderBoardFromSnapshot(anim);
-
-        if (statusEl) {
-            statusEl.textContent =
-                `Prise : Joueur ${lastMove.player} récolte ${lastMove.harvested} graine(s)`;
-        }
-        await delay(700);
-    }
-
-    clearPitHighlights();
-}
-
-async function processServerResponse(data, boardBefore) {
-    const moveBefore = data.lastMove?.boardBefore || boardBefore;
-    const shouldAnimate = Boolean(
-        data.lastMove
-        && data.lastMove.id !== lastAnimatedMoveId
-        && moveBefore
-        && data.lastMove.sowSteps
-        && data.lastMove.sowSteps.length > 0
-    );
-
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-    if (shouldAnimate && !reduceMotion) {
+    if (!reduceMotion && lastMove.sowSteps.length > 0) {
         isAnimating = true;
         try {
-            await animateMove(data.lastMove, moveBefore);
-            lastAnimatedMoveId = data.lastMove.id;
+            await animateMove(lastMove, boardBefore);
         } finally {
             isAnimating = false;
         }
-    } else if (shouldAnimate && reduceMotion) {
-        const statusEl = document.getElementById('game-status');
-        if (statusEl) {
-            statusEl.textContent =
-                `Joueur ${data.lastMove.player} — case ${data.lastMove.caseNumber} (${data.lastMove.seedsPicked} graines)`;
-        }
-        lastAnimatedMoveId = data.lastMove.id;
-    } else if (data.lastMove && data.lastMove.id !== lastAnimatedMoveId) {
-        lastAnimatedMoveId = data.lastMove.id;
     }
 
-    applyServerGame(data);
-    renderGame();
+    state.nord = board.nord;
+    state.sud = board.sud;
+    state.scores[player - 1] += harvested;
+
+    checkEndConditions();
+
+    if (!state.gameOver) {
+        state.currentPlayer = player === 1 ? 2 : 1;
+        state.message = `Tour de Joueur ${state.currentPlayer}`;
+        if (isSolidarityImpossible(state.currentPlayer)) {
+            endGameBySolidarity();
+        }
+    }
+
+    return true;
 }
 
-async function syncFromServer() {
-    if (!gameId || !playerToken || isAnimating || syncInFlight) return;
-    syncInFlight = true;
-    try {
-        const boardBefore = snapshotBoard();
-        const data = await ajaxRequest('GET', `/api/games/${gameId}`);
-        await processServerResponse(data, boardBefore);
-    } catch (err) {
-        /* Partie supprimée ou serveur redémarré → arrêter le polling */
-        if (err.status === 404 || err.status === 403) {
-            stopPolling();
-            clearSession();
-        }
-    } finally {
-        syncInFlight = false;
+/** Vérifie les conditions de fin */
+function checkEndConditions() {
+    if (state.scores[0] >= WIN_SCORE) {
+        markGameOver('Joueur 1 gagne avec 40 graines ou plus !');
+        return;
+    }
+    if (state.scores[1] >= WIN_SCORE) {
+        markGameOver('Joueur 2 gagne avec 40 graines ou plus !');
+        return;
+    }
+    if (boardTotal() < MIN_BOARD_SEEDS) {
+        // Graines restantes au propriétaire
+        state.scores[0] += state.sud.reduce((a, b) => a + b, 0);
+        state.scores[1] += state.nord.reduce((a, b) => a + b, 0);
+        state.nord = Array(CASES).fill(0);
+        state.sud = Array(CASES).fill(0);
+        markGameOver(resolveWinner());
     }
 }
 
-async function createOnlineGame() {
-    const data = await ajaxRequest('POST', '/api/games');
-    applyServerGame(data);
-    showScreen('game');
-    buildBoard();
-    renderGame();
-    startPolling();
+/** Fin par solidarité impossible */
+function endGameBySolidarity() {
+    state.scores[0] += state.sud.reduce((a, b) => a + b, 0);
+    state.scores[1] += state.nord.reduce((a, b) => a + b, 0);
+    state.nord = Array(CASES).fill(0);
+    state.sud = Array(CASES).fill(0);
+    markGameOver('Solidarité impossible. ' + resolveWinner());
 }
 
-async function joinOnlineGame(id) {
-    const code = (id || '').trim().toUpperCase();
-    if (!code) throw new Error('Code de partie requis.');
-
-    const data = await ajaxRequest('POST', `/api/games/${code}/join`);
-    applyServerGame(data);
-    lastAnimatedMoveId = data.lastMove ? data.lastMove.id : 0;
-    showScreen('game');
-    buildBoard();
-    renderGame();
-    startPolling();
+function resolveWinner() {
+    if (state.scores[0] >= WIN_SCORE) return 'Joueur 1 gagne !';
+    if (state.scores[1] >= WIN_SCORE) return 'Joueur 2 gagne !';
+    // Règle officielle : nul si aucun joueur n'atteint 40 graines
+    return 'Match nul — aucun joueur n\'a atteint 40 graines.';
 }
 
-async function playMoveRemote(pickIndex) {
-    const boardBefore = snapshotBoard();
-    const data = await ajaxRequest('POST', `/api/games/${gameId}/moves`, { pickIndex });
-    await processServerResponse(data, boardBefore);
-}
-
-async function abandonOnlineGame() {
-    if (gameId && playerToken) {
-        try {
-            await ajaxRequest('DELETE', `/api/games/${gameId}`);
-        } catch {
-            /* partie déjà supprimée */
-        }
-    }
-    stopPolling();
-    clearSession();
-    state = null;
-}
-
+/** Détermine le vainqueur d'une partie terminée (1, 2 ou nul) */
 function getMatchWinner() {
-    if (!state) return 0;
     if (state.scores[0] >= WIN_SCORE) return 1;
     if (state.scores[1] >= WIN_SCORE) return 2;
     return 0;
@@ -475,6 +543,125 @@ function markGameOver(message) {
 /* ============================================================
    3. RENDU VISUEL
    ============================================================ */
+
+function delay(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function findPit(side, index) {
+    return document.querySelector(
+        `#game-board .pit[data-side="${side}"][data-index="${index}"]`
+    );
+}
+
+function clearPitHighlights() {
+    document.querySelectorAll('#game-board .pit').forEach((pit) => {
+        pit.classList.remove('pit--picked', 'pit--sowing', 'pit--harvested', 'pit--last-sown');
+    });
+}
+
+function renderBoardFromSnapshot(snapshot) {
+    if (!snapshot) return;
+
+    document.querySelectorAll('#game-board .pit').forEach((pit) => {
+        const side = pit.dataset.side;
+        const index = parseInt(pit.dataset.index, 10);
+        const count = snapshot[side][index];
+
+        let seedsEl = pit.querySelector('.seeds');
+        if (!seedsEl) {
+            seedsEl = document.createElement('div');
+            seedsEl.className = 'seeds';
+            pit.appendChild(seedsEl);
+        }
+        renderSeedsInContainer(seedsEl, count);
+
+        let countEl = pit.querySelector('.pit__count');
+        if (count > 12) {
+            if (!countEl) {
+                countEl = document.createElement('span');
+                countEl.className = 'pit__count';
+                pit.appendChild(countEl);
+            }
+            countEl.textContent = count;
+        } else if (countEl) {
+            countEl.remove();
+        }
+    });
+
+    if (snapshot.scores) {
+        document.querySelectorAll('.score-value').forEach((el) => {
+            const p = parseInt(el.dataset.player, 10);
+            el.textContent = snapshot.scores[p - 1];
+        });
+    }
+}
+
+async function animateMove(lastMove, boardBefore) {
+    const statusEl = document.getElementById('game-status');
+    const anim = {
+        nord: [...boardBefore.nord],
+        sud: [...boardBefore.sud],
+        scores: [...boardBefore.scores],
+    };
+
+    const stepCount = lastMove.sowSteps.length;
+    const stepMs = Math.max(
+        ANIM_STEP_MS_MIN,
+        Math.min(ANIM_STEP_MS_MAX, Math.floor(ANIM_TOTAL_MAX_MS / Math.max(stepCount, 1)))
+    );
+
+    if (statusEl) {
+        statusEl.textContent =
+            `Joueur ${lastMove.player} joue la case ${lastMove.caseNumber} (${lastMove.seedsPicked} graines)`;
+    }
+
+    clearPitHighlights();
+    const sourcePit = findPit(lastMove.pickSide, lastMove.pickIndex);
+    if (sourcePit) sourcePit.classList.add('pit--picked');
+
+    anim[lastMove.pickSide][lastMove.pickIndex] = 0;
+    renderBoardFromSnapshot(anim);
+    await delay(400);
+
+    for (let i = 0; i < lastMove.sowSteps.length; i++) {
+        const step = lastMove.sowSteps[i];
+        clearPitHighlights();
+        if (sourcePit) sourcePit.classList.add('pit--picked');
+
+        const targetPit = findPit(step.side, step.index);
+        if (targetPit) targetPit.classList.add('pit--sowing');
+
+        anim[step.side][step.index]++;
+        renderBoardFromSnapshot(anim);
+
+        if (i === lastMove.sowSteps.length - 1 && targetPit) {
+            targetPit.classList.add('pit--last-sown');
+        }
+
+        await delay(stepMs);
+    }
+
+    if (lastMove.harvested > 0) {
+        clearPitHighlights();
+        for (const h of lastMove.harvestedPits) {
+            const pit = findPit(h.side, h.index);
+            if (pit) pit.classList.add('pit--harvested');
+            anim[h.side][h.index] -= h.count;
+            if (anim[h.side][h.index] < 0) anim[h.side][h.index] = 0;
+        }
+        anim.scores[lastMove.player - 1] += lastMove.harvested;
+        renderBoardFromSnapshot(anim);
+
+        if (statusEl) {
+            statusEl.textContent =
+                `Prise : Joueur ${lastMove.player} récolte ${lastMove.harvested} graine(s)`;
+        }
+        await delay(700);
+    }
+
+    clearPitHighlights();
+}
 
 /** Positions pseudo-aléatoires pour empiler les graines visuellement */
 const SEED_OFFSETS = [
@@ -544,19 +731,18 @@ function createPitElement(player, index, side) {
     pit.dataset.side = side;
     pit.setAttribute('aria-label', `Case ${caseNumber(side, index)}, joueur ${player}`);
 
-    pit.addEventListener('click', async () => {
-        if (!state || state.gameOver || isAnimating) return;
+    pit.addEventListener('click', () => {
+        if (state.gameOver || isAnimating) return;
 
-        if (player !== playerSlot) {
-            showMoveRefusal('Vous ne pouvez jouer que sur votre propre camp.');
+        const refusal = explainRefusedMove(player, index);
+        if (refusal) {
+            showMoveRefusal(refusal);
             return;
         }
 
-        try {
-            await playMoveRemote(index);
-        } catch (err) {
-            showMoveRefusal(err.message);
-        }
+        playMove(index).then((ok) => {
+            if (ok) renderGame();
+        });
     });
 
     return pit;
@@ -577,7 +763,9 @@ function renderGame() {
     if (!statusEl) return;
     statusEl.textContent = state.message;
 
-    const legalIndices = new Set(remoteLegalMoves);
+    const legalMoves = getLegalMoves();
+    const legalIndices = new Set(legalMoves.map(m => m.index));
+    const currentSide = playerSide(state.currentPlayer);
 
     // Uniquement les cases du plateau de jeu (pas celles du menu)
     document.querySelectorAll('#game-board .pit').forEach((pit) => {
@@ -588,8 +776,7 @@ function renderGame() {
 
         pit.classList.toggle('pit--playable',
             !state.gameOver &&
-            player === playerSlot &&
-            state.currentPlayer === playerSlot &&
+            player === state.currentPlayer &&
             legalIndices.has(index)
         );
         pit.classList.toggle('pit--active-turn', player === state.currentPlayer);
@@ -675,21 +862,18 @@ function hideGameEndActions() {
     endActions.setAttribute('aria-hidden', 'true');
 }
 
-async function quitAfterGame() {
+function quitAfterGame() {
     if (!state) return;
     state.endChoiceMade = true;
     hideGameEndActions();
-    await abandonOnlineGame();
-    state = null;
     goToMenu();
 }
 
-async function continueAfterGame() {
+function continueAfterGame() {
     if (!state) return;
     state.endChoiceMade = true;
     hideGameEndActions();
-    await abandonOnlineGame();
-    await startGame();
+    startGame();
 }
 
 
@@ -835,8 +1019,6 @@ function showScreen(name) {
 }
 
 function goToMenu() {
-    stopPolling();
-    updateLobbyStatus(null);
     const refusal = document.getElementById('move-refusal');
     if (refusal) {
         refusal.hidden = true;
@@ -852,13 +1034,11 @@ function goToMenu() {
 /**
  * Réinitialise l'application : retour menu, scores à zéro, plateau d'aperçu.
  */
-async function resetApplication() {
+function resetApplication() {
     setOptionsMenuOpen(false);
     closeRules();
     closeAbout();
-    closeScores();
 
-    await abandonOnlineGame();
     state = null;
 
     document.querySelectorAll('.score-value').forEach((el) => {
@@ -885,34 +1065,30 @@ function goToSplash() {
     splash.addEventListener('click', leaveSplash);
 }
 
-async function startGame() {
+function startGame() {
     hideGameEndActions();
     const refusal = document.getElementById('move-refusal');
     if (refusal) {
         refusal.hidden = true;
         refusal.innerHTML = '';
     }
-    state = null;
-    lastAnimatedMoveId = 0;
-    isAnimating = false;
-    clearSession();
-    await createOnlineGame();
+    // Afficher l'écran de jeu en premier (retour visuel immédiat)
+    showScreen('game');
+    state = createInitialState();
+    buildBoard();
+    renderGame();
 }
 
-async function abandonGame() {
-    if (!confirm('Abandonner la partie et retourner au menu ?')) return;
-    await abandonOnlineGame();
-    state = null;
-    document.querySelectorAll('.score-value').forEach((el) => {
-        el.textContent = '0';
-    });
-    goToMenu();
+function abandonGame() {
+    if (confirm('Abandonner la partie et retourner au menu ?')) {
+        goToMenu();
+    }
 }
 
-async function restartGame() {
-    if (!confirm('Créer une nouvelle partie en ligne ?')) return;
-    await abandonOnlineGame();
-    await startGame();
+function restartGame() {
+    if (confirm('Recommencer une nouvelle partie ?')) {
+        startGame();
+    }
 }
 
 
@@ -958,16 +1134,7 @@ function initNavigation() {
 
         if (target.closest('#btn-play')) {
             event.preventDefault();
-            startGame().catch((err) => alert(err.message));
-            return;
-        }
-        if (target.closest('#btn-join')) {
-            event.preventDefault();
-            openJoinModal();
-            return;
-        }
-        if (target.closest('#btn-cancel-join')) {
-            closeJoinModal();
+            startGame();
             return;
         }
         if (target.closest('#btn-help')) {
@@ -1033,41 +1200,6 @@ function initNavigation() {
         event.stopPropagation();
         resetApplication();
     });
-
-    document.getElementById('btn-join')?.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        openJoinModal();
-    });
-
-    document.getElementById('join-form')?.addEventListener('submit', (event) => {
-        event.preventDefault();
-        submitJoinModal().catch((err) => alert(err.message));
-    });
-}
-
-function openJoinModal() {
-    const modal = document.getElementById('join-modal');
-    const input = document.getElementById('join-code-input');
-    if (!modal) return;
-    if (input) input.value = '';
-    modal.showModal();
-    window.setTimeout(() => input?.focus(), 50);
-}
-
-function closeJoinModal() {
-    document.getElementById('join-modal')?.close();
-}
-
-async function submitJoinModal() {
-    const input = document.getElementById('join-code-input');
-    const code = (input?.value || '').trim().toUpperCase();
-    if (!code) {
-        input?.focus();
-        return;
-    }
-    closeJoinModal();
-    await joinOnlineGame(code);
 }
 
 function openRules() {
